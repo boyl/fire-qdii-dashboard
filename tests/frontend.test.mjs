@@ -43,3 +43,13 @@ test("groups off-exchange funds and exchange-traded ETFs separately", async () =
   assert.match(source, /场外申购/);
   assert.match(source, /关注价格、IOPV 与溢价/);
 });
+
+test("paginates each fund group in sets of two", async () => {
+  const source = await readFile(new URL("src/App.tsx", root), "utf8");
+  assert.match(source, /const FUND_PAGE_SIZE = 2/);
+  assert.match(source, /visibleFunds: group\.funds\.slice/);
+  assert.match(source, /aria-label={`\$\{group\.title\}分页`}/);
+  assert.match(source, /className="fund-page-track"/);
+  assert.match(source, /aria-current=/);
+  assert.match(source, /PAGE/);
+});

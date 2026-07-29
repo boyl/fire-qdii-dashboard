@@ -1092,6 +1092,115 @@ tbody tr:last-child td {
   gap: 14px;
 }
 
+.fund-pagination {
+  display: grid;
+  grid-template-columns: 38px minmax(130px, 220px) 38px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.page-arrow {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid #c7cec9;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--green);
+  font: 500 15px/1 "DM Mono", monospace;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.page-arrow:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: #fffefa;
+  transform: translateY(-1px);
+}
+
+.page-arrow:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.page-center {
+  min-width: 0;
+}
+
+.page-indicator {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 5px;
+}
+
+.page-indicator small {
+  margin-right: 4px;
+  color: var(--accent);
+  font: 500 7px/1 "DM Mono", monospace;
+  letter-spacing: 0.16em;
+}
+
+.page-indicator strong {
+  color: var(--green);
+  font: 600 14px/1 "DM Mono", monospace;
+}
+
+.page-indicator span {
+  color: var(--muted);
+  font: 400 8px/1 "DM Mono", monospace;
+}
+
+.fund-page-track {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  margin-top: 4px;
+  padding: 4px 0;
+  scrollbar-width: none;
+}
+
+.fund-page-track::-webkit-scrollbar {
+  display: none;
+}
+
+.page-step {
+  flex: 1 0 18px;
+  height: 18px;
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.page-step::before {
+  display: block;
+  width: 100%;
+  height: 2px;
+  border-radius: 99px;
+  background: #cfd5d1;
+  content: "";
+  transition:
+    height 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.page-step:hover::before {
+  background: #95a79e;
+}
+
+.page-step.active::before {
+  height: 4px;
+  background: var(--accent);
+  box-shadow: 0 2px 7px rgba(208, 103, 77, 0.25);
+}
+
 .fund-card {
   padding: 20px;
   cursor: pointer;
@@ -1775,6 +1884,10 @@ tbody tr:last-child td {
     grid-template-columns: 1fr 1fr;
   }
 
+  .fund-pagination {
+    justify-content: center;
+  }
+
   .fund-detail-summary {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1821,6 +1934,17 @@ tbody tr:last-child td {
   .fund-grid,
   .health-strip {
     grid-template-columns: 1fr;
+  }
+
+  .fund-pagination {
+    grid-template-columns: 36px minmax(0, 1fr) 36px;
+    width: 100%;
+    gap: 8px;
+  }
+
+  .page-arrow {
+    width: 36px;
+    height: 36px;
   }
 
   .boundary-grid {

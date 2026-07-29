@@ -121,6 +121,8 @@ function isExchangeTraded(fund: FundWatch) {
   );
 }
 
+const FUND_PAGE_SIZE = 2;
+
 function localDate() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -723,6 +725,10 @@ function QDIITracker() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [fundPages, setFundPages] = useState<Record<string, number>>({
+    "off-exchange": 1,
+    "exchange-traded": 1,
+  });
 
   const refresh = useCallback(async () => {
     try {
@@ -743,6 +749,25 @@ function QDIITracker() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const counts = {
+      "off-exchange": funds.filter((fund) => !isExchangeTraded(fund)).length,
+      "exchange-traded": funds.filter(isExchangeTraded).length,
+    };
+    setFundPages((current) => {
+      const next = { ...current };
+      let changed = false;
+      Object.entries(counts).forEach(([key, count]) => {
+        const lastPage = Math.max(1, Math.ceil(count / FUND_PAGE_SIZE));
+        if ((next[key] ?? 1) > lastPage) {
+          next[key] = lastPage;
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, [funds]);
 
   const syncNow = async () => {
     setSyncing(true);
@@ -787,7 +812,19 @@ function QDIITracker() {
       copy: "关注价格、IOPV 与溢价",
       funds: funds.filter(isExchangeTraded),
     },
-  ].filter((group) => group.funds.length > 0);
+  ]
+    .filter((group) => group.funds.length > 0)
+    .map((group) => {
+      const pageCount = Math.ceil(group.funds.length / FUND_PAGE_SIZE);
+      const currentPage = Math.min(fundPages[group.key] ?? 1, pageCount);
+      const offset = (currentPage - 1) * FUND_PAGE_SIZE;
+      return {
+        ...group,
+        currentPage,
+        pageCount,
+        visibleFunds: group.funds.slice(offset, offset + FUND_PAGE_SIZE),
+      };
+    });
 
   return (
     <div className="page-wrap">
@@ -858,7 +895,7 @@ function QDIITracker() {
                     <strong>{group.funds.length} 只</strong>
                   </div>
                   <div className="fund-grid">
-                    {group.funds.map((fund) => (
+                    {group.visibleFunds.map((fund) => (
                       <FundCard
                         key={fund.fund_code}
                         fund={fund}
@@ -867,6 +904,87 @@ function QDIITracker() {
                       />
                     ))}
                   </div>
+                  {group.pageCount > 1 && (
+                    <nav
+                      className="fund-pagination"
+                      aria-label={`${group.title}分页`}
+                    >
+                      <button
+                        className="page-arrow"
+                        type="button"
+                        aria-label={`${group.title}上一页`}
+                        disabled={group.currentPage === 1}
+                        onClick={() =>
+                          setFundPages((current) => ({
+                            ...current,
+                            [group.key]: group.currentPage - 1,
+                          }))
+                        }
+                      >
+                        ←
+                      </button>
+                      <div className="page-center">
+                        <div className="page-indicator">
+                          <small>PAGE</small>
+                          <strong>
+                            {String(group.currentPage).padStart(2, "0")}
+                          </strong>
+                          <span>
+                            / {String(group.pageCount).padStart(2, "0")}
+                          </span>
+                        </div>
+                        <div
+                          className="fund-page-track"
+                          role="group"
+                          aria-label={`${group.title}选择页码`}
+                        >
+                          {Array.from(
+                            { length: group.pageCount },
+                            (_, index) => {
+                              const pageNumber = index + 1;
+                              return (
+                                <button
+                                  className={`page-step ${
+                                    pageNumber === group.currentPage
+                                      ? "active"
+                                      : ""
+                                  }`}
+                                  type="button"
+                                  key={pageNumber}
+                                  aria-label={`第 ${pageNumber} 页`}
+                                  aria-current={
+                                    pageNumber === group.currentPage
+                                      ? "page"
+                                      : undefined
+                                  }
+                                  onClick={() =>
+                                    setFundPages((current) => ({
+                                      ...current,
+                                      [group.key]: pageNumber,
+                                    }))
+                                  }
+                                />
+                              );
+                            },
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        className="page-arrow"
+                        type="button"
+                        aria-label={`${group.title}下一页`}
+                        disabled={group.currentPage === group.pageCount}
+                        onClick={() =>
+                          setFundPages((current) => ({
+                            ...current,
+                            [group.key]: group.currentPage + 1,
+                          }))
+                        }
+                      >
+                        →
+                      </button>
+                    </nav>
+                  )}
                 </section>
               ))}
             </div>
