@@ -13,7 +13,7 @@ from typing import Any, Iterator, Sequence
 from .calculations import ASSET_KEYS, premium_rate
 from .config import DATABASE_PATH
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
@@ -114,6 +114,10 @@ class Database:
                 premium REAL,
                 premium_basis TEXT,
                 tracking_error REAL,
+                tracking_error_source_url TEXT,
+                tracking_error_as_of TEXT,
+                tracking_error_method TEXT,
+                tracking_error_stale INTEGER NOT NULL DEFAULT 1,
                 purchase_status TEXT,
                 daily_limit_cents INTEGER,
                 fund_scale_cents INTEGER,
@@ -228,6 +232,21 @@ class Database:
                 "qdii_quota_source_url": "TEXT",
             }
             for column, column_type in snapshot_source_migrations.items():
+                if column not in snapshot_columns:
+                    connection.execute(
+                        f"ALTER TABLE fund_snapshots ADD COLUMN {column} {column_type}"
+                    )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (4, utc_now()),
+            )
+            tracking_error_migrations = {
+                "tracking_error_source_url": "TEXT",
+                "tracking_error_as_of": "TEXT",
+                "tracking_error_method": "TEXT",
+                "tracking_error_stale": "INTEGER NOT NULL DEFAULT 1",
+            }
+            for column, column_type in tracking_error_migrations.items():
                 if column not in snapshot_columns:
                     connection.execute(
                         f"ALTER TABLE fund_snapshots ADD COLUMN {column} {column_type}"
@@ -398,6 +417,10 @@ class Database:
     def _snapshot_row(row: sqlite3.Row | None) -> dict | None:
         if row is None:
             return None
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+        except (TypeError, ValueError):
+            raw = {}
         return {
             "id": row["id"],
             "fund_code": row["fund_code"],
@@ -410,6 +433,10 @@ class Database:
             "premium": row["premium"],
             "premium_basis": row["premium_basis"],
             "tracking_error": row["tracking_error"],
+            "tracking_error_source_url": row["tracking_error_source_url"],
+            "tracking_error_as_of": row["tracking_error_as_of"],
+            "tracking_error_method": row["tracking_error_method"],
+            "tracking_error_stale": bool(row["tracking_error_stale"]),
             "purchase_status": row["purchase_status"],
             "daily_limit": from_cents(row["daily_limit_cents"]),
             "fund_scale": from_cents(row["fund_scale_cents"]),
@@ -426,6 +453,7 @@ class Database:
             "corrected": bool(row["corrected"]),
             "correction_note": row["correction_note"],
             "raw_json": row["raw_json"],
+            "carried_fields": raw.get("carried_fields") or [],
         }
 
     def list_funds(self, active_only: bool = True) -> list[dict]:
@@ -537,6 +565,53 @@ class Database:
                 (name, utc_now(), code),
             )
 
+    def update_fund_benchmark(self, code: str, benchmark: str) -> None:
+        if not benchmark:
+            return
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE fund_watches SET benchmark=?, updated_at=?
+                WHERE fund_code=?
+                """,
+                (benchmark, utc_now(), code),
+            )
+
+    def update_fund_direct_limit(
+        self,
+        code: str,
+        daily_limit: float,
+        channel: str,
+        source_url: str | None,
+        effective_date: str | None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE fund_watches
+                SET channel_daily_limit_cents=?,
+                    limit_channel=?,
+                    limit_source_url=?,
+                    limit_effective_date=?,
+                    updated_at=?
+                WHERE fund_code=?
+                  AND (
+                    limit_effective_date IS NULL
+                    OR (? IS NOT NULL AND limit_effective_date <= ?)
+                  )
+                """,
+                (
+                    to_cents(daily_limit),
+                    channel,
+                    source_url,
+                    effective_date,
+                    utc_now(),
+                    code,
+                    effective_date,
+                    effective_date,
+                ),
+            )
+
     def deactivate_fund(self, code: str) -> bool:
         with self.connect() as connection:
             cursor = connection.execute(
@@ -552,12 +627,14 @@ class Database:
                 INSERT INTO fund_snapshots(
                     fund_code, business_date, estimate, nav, estimate_error,
                     market_price, iopv, premium, premium_basis, tracking_error,
+                    tracking_error_source_url, tracking_error_as_of,
+                    tracking_error_method, tracking_error_stale,
                     purchase_status, daily_limit_cents, fund_scale_cents,
                     fund_scale_source_url, fund_manager,
                     manager_qdii_quota_usd_cents, qdii_quota_date,
                     qdii_quota_source_url, source_time, source, stale,
                     corrected, correction_note, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
                 """,
                 (
                     values["fund_code"],
@@ -570,6 +647,10 @@ class Database:
                     values.get("premium"),
                     values.get("premium_basis"),
                     values.get("tracking_error"),
+                    values.get("tracking_error_source_url"),
+                    values.get("tracking_error_as_of"),
+                    values.get("tracking_error_method"),
+                    1 if values.get("tracking_error_stale") else 0,
                     values.get("purchase_status"),
                     to_cents(values.get("daily_limit")),
                     to_cents(values.get("fund_scale")),
@@ -830,6 +911,10 @@ class Database:
                 "estimate",
                 "market_price",
                 "premium_pct",
+                "published_tracking_error_pct",
+                "tracking_error_as_of",
+                "tracking_error_source_url",
+                "tracking_error_stale",
                 "source_time",
             ]
         )
@@ -871,6 +956,10 @@ class Database:
                         item["estimate"],
                         item["market_price"],
                         item["premium"],
+                        item["tracking_error"],
+                        item["tracking_error_as_of"],
+                        item["tracking_error_source_url"],
+                        item["tracking_error_stale"],
                         item["source_time"],
                     ]
                 )
@@ -914,6 +1003,10 @@ class Database:
                     "premium",
                     "premium_basis",
                     "tracking_error",
+                    "tracking_error_source_url",
+                    "tracking_error_as_of",
+                    "tracking_error_method",
+                    "tracking_error_stale",
                     "purchase_status",
                     "daily_limit_cents",
                     "fund_scale_cents",

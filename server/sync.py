@@ -47,6 +47,9 @@ def _carry_forward(collected: dict[str, Any], previous: dict | None) -> dict:
         "premium",
         "premium_basis",
         "tracking_error",
+        "tracking_error_source_url",
+        "tracking_error_as_of",
+        "tracking_error_method",
         "purchase_status",
         "daily_limit",
         "fund_scale",
@@ -56,9 +59,13 @@ def _carry_forward(collected: dict[str, Any], previous: dict | None) -> dict:
         "qdii_quota_date",
         "qdii_quota_source_url",
     )
+    carried_fields = []
     for field in carry_fields:
         if collected.get(field) is None:
             collected[field] = previous.get(field)
+            if previous.get(field) is not None:
+                carried_fields.append(field)
+    collected["_carried_fields"] = carried_fields
     return collected
 
 
@@ -117,7 +124,16 @@ class SyncService:
                 has_fresh_data = any(
                     collected.get(field) is not None for field in fresh_fields
                 )
+                tracking_error_fresh = collected.get("tracking_error") is not None
                 collected = _carry_forward(collected, previous)
+                if tracking_error_fresh:
+                    collected["tracking_error_stale"] = False
+                elif mode == "morning" and previous:
+                    collected["tracking_error_stale"] = previous.get(
+                        "tracking_error_stale", True
+                    )
+                else:
+                    collected["tracking_error_stale"] = True
                 collected["fund_code"] = code
                 collected["stale"] = not has_fresh_data
                 collected.setdefault("source_time", self._now())
@@ -127,6 +143,12 @@ class SyncService:
                     collected["raw"] = {
                         **(collected.get("raw") or {}),
                         "errors": errors,
+                    }
+                carried_fields = collected.pop("_carried_fields", [])
+                if carried_fields:
+                    collected["raw"] = {
+                        **(collected.get("raw") or {}),
+                        "carried_fields": carried_fields,
                     }
 
                 new_status = collected.get("purchase_status")
@@ -141,9 +163,23 @@ class SyncService:
                 )
 
                 snapshot = self.database.save_fund_snapshot(collected)
+                direct_limit = collected.get("channel_daily_limit")
+                if direct_limit is not None and not watch.get("exchange_code"):
+                    self.database.update_fund_direct_limit(
+                        code=code,
+                        daily_limit=direct_limit,
+                        channel=collected.get("limit_channel")
+                        or "基金公司直销渠道",
+                        source_url=collected.get("limit_source_url"),
+                        effective_date=collected.get("limit_effective_date"),
+                    )
                 if collected.get("name"):
                     self.database.update_fund_name_if_empty(
                         code, collected["name"]
+                    )
+                if collected.get("public_benchmark"):
+                    self.database.update_fund_benchmark(
+                        code, collected["public_benchmark"]
                     )
                 if changed:
                     self.database.record_status_change(

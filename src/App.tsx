@@ -107,22 +107,15 @@ function formatPercent(value: number | null | undefined, digits = 1) {
 }
 
 function dailyLimitForFund(fund: FundWatch) {
-  return fund.channel_daily_limit ?? fund.latest?.daily_limit;
+  return fund.channel_daily_limit;
 }
 
 function formatDailyLimit(fund: FundWatch) {
   if (isExchangeTraded(fund)) return "不适用";
   const limit = dailyLimitForFund(fund);
   return limit == null
-    ? "未公布"
+    ? "待核实"
     : formatMoney(limit);
-}
-
-function formatSnapshotDailyLimit(snapshot: FundSnapshot) {
-  if (snapshot.purchase_status?.includes("场内交易")) return "不适用";
-  return snapshot.daily_limit == null
-    ? "未公布"
-    : formatMoney(snapshot.daily_limit);
 }
 
 function formatFundScale(value: number | null | undefined) {
@@ -131,6 +124,10 @@ function formatFundScale(value: number | null | undefined) {
 
 function formatQdiiQuota(value: number | null | undefined) {
   return value == null ? "未公布" : `${number.format(value / 100_000_000)} 亿美元`;
+}
+
+function wasCarried(snapshot: FundSnapshot | null | undefined, field: string) {
+  return snapshot?.carried_fields?.includes(field) ?? false;
 }
 
 function SourceLink({
@@ -165,18 +162,33 @@ function isExchangeTraded(fund: FundWatch) {
 }
 
 const FUND_PAGE_SIZE = 2;
-type LimitSort = "default" | "descending" | "ascending";
+type FundSort =
+  | "default"
+  | "limit-descending"
+  | "limit-ascending"
+  | "tracking-ascending"
+  | "tracking-descending";
 
-function sortByDailyLimit(funds: FundWatch[], sort: LimitSort) {
+function sortableValue(fund: FundWatch, sort: FundSort) {
+  if (sort.startsWith("limit-")) return dailyLimitForFund(fund);
+  if (sort.startsWith("tracking-")) {
+    return fund.latest?.tracking_error_stale
+      ? null
+      : fund.latest?.tracking_error;
+  }
+  return null;
+}
+
+function sortFunds(funds: FundWatch[], sort: FundSort) {
   if (sort === "default") return funds;
   return [...funds].sort((left, right) => {
-    const leftLimit = dailyLimitForFund(left);
-    const rightLimit = dailyLimitForFund(right);
-    if (leftLimit == null) return rightLimit == null ? 0 : 1;
-    if (rightLimit == null) return -1;
-    return sort === "descending"
-      ? rightLimit - leftLimit
-      : leftLimit - rightLimit;
+    const leftValue = sortableValue(left, sort);
+    const rightValue = sortableValue(right, sort);
+    if (leftValue == null) return rightValue == null ? 0 : 1;
+    if (rightValue == null) return -1;
+    return sort.endsWith("descending")
+      ? rightValue - leftValue
+      : leftValue - rightValue;
   });
 }
 
@@ -782,7 +794,10 @@ function QDIITracker() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [limitSort, setLimitSort] = useState<LimitSort>("descending");
+  const [fundSorts, setFundSorts] = useState<Record<string, FundSort>>({
+    "off-exchange": "limit-descending",
+    "exchange-traded": "default",
+  });
   const [fundPages, setFundPages] = useState<Record<string, number>>({
     "off-exchange": 1,
     "exchange-traded": 1,
@@ -861,9 +876,9 @@ function QDIITracker() {
       eyebrow: "OFF-EXCHANGE",
       title: "场外基金",
       copy: "关注申购状态与每日限额",
-      funds: sortByDailyLimit(
+      funds: sortFunds(
         funds.filter((fund) => !isExchangeTraded(fund)),
-        limitSort,
+        fundSorts["off-exchange"],
       ),
     },
     {
@@ -871,7 +886,10 @@ function QDIITracker() {
       eyebrow: "EXCHANGE-TRADED",
       title: "场内 ETF",
       copy: "关注价格、IOPV 与溢价",
-      funds: funds.filter(isExchangeTraded),
+      funds: sortFunds(
+        funds.filter(isExchangeTraded),
+        fundSorts["exchange-traded"],
+      ),
     },
   ]
     .filter((group) => group.funds.length > 0)
@@ -954,26 +972,41 @@ function QDIITracker() {
                       <span>{group.copy}</span>
                     </div>
                     <div className="watch-group-actions">
-                      {group.key === "off-exchange" && (
-                        <label className="limit-sort">
-                          <span>额度排序</span>
-                          <select
-                            aria-label="按单日申购额度排序"
-                            value={limitSort}
-                            onChange={(event) => {
-                              setLimitSort(event.target.value as LimitSort);
-                              setFundPages((current) => ({
-                                ...current,
-                                "off-exchange": 1,
-                              }));
-                            }}
-                          >
-                            <option value="descending">额度高 → 低</option>
-                            <option value="default">默认顺序</option>
-                            <option value="ascending">额度低 → 高</option>
-                          </select>
-                        </label>
-                      )}
+                      <label className="fund-sort">
+                        <span>排序方式</span>
+                        <select
+                          aria-label={`按${group.title}数据排序`}
+                          value={fundSorts[group.key]}
+                          onChange={(event) => {
+                            setFundSorts((current) => ({
+                              ...current,
+                              [group.key]: event.target.value as FundSort,
+                            }));
+                            setFundPages((current) => ({
+                              ...current,
+                              [group.key]: 1,
+                            }));
+                          }}
+                        >
+                          {group.key === "off-exchange" && (
+                            <>
+                              <option value="limit-descending">
+                                直销额度高 → 低
+                              </option>
+                              <option value="limit-ascending">
+                                直销额度低 → 高
+                              </option>
+                            </>
+                          )}
+                          <option value="tracking-ascending">
+                            跟踪误差低 → 高
+                          </option>
+                          <option value="tracking-descending">
+                            跟踪误差高 → 低
+                          </option>
+                          <option value="default">默认顺序</option>
+                        </select>
+                      </label>
                       <strong>{group.funds.length} 只</strong>
                     </div>
                   </div>
@@ -1263,24 +1296,32 @@ function FundCard({
         </div>
       </div>
       <div className="limit-display">
-        <span>{exchangeTraded ? "场内最新价" : "单日限购额度"}</span>
+        <span>{exchangeTraded ? "场内最新价" : "直销单日额度"}</span>
         <strong>
           {exchangeTraded
             ? formatValue(latest?.market_price)
             : formatDailyLimit(fund)}
         </strong>
-        <small>
-          {fund.limit_channel
-            ? `${fund.limit_channel}${
-                fund.limit_effective_date
-                  ? ` · 生效于 ${fund.limit_effective_date}`
-                  : ""
-              }`
-            : latest?.source_time
-            ? `采集于 ${new Date(latest.source_time).toLocaleString("zh-CN")}`
-            : "等待首次采集"}
-          {latest?.stale ? " · 数据已过期" : ""}
-        </small>
+        <div className="metric-source-row">
+          <small>
+            {fund.limit_channel
+              ? `${fund.limit_channel}${
+                  fund.limit_effective_date
+                    ? ` · 生效于 ${fund.limit_effective_date}`
+                    : ""
+                }`
+              : latest?.source_time
+              ? `采集于 ${new Date(latest.source_time).toLocaleString("zh-CN")}`
+              : "等待核实基金公司直销公告"}
+            {latest?.stale ? " · 数据已过期" : ""}
+            {latest?.carried_fields?.length
+              ? " · 部分字段沿用上次有效值"
+              : ""}
+          </small>
+          {!exchangeTraded && (
+            <SourceLink href={fund.limit_source_url} label="直销公告" />
+          )}
+        </div>
       </div>
       <div className="fund-metrics">
         <div>
@@ -1304,8 +1345,18 @@ function FundCard({
           </strong>
         </div>
         <div>
-          <span>60日跟踪误差</span>
+          <span>公开年化跟踪误差</span>
           <strong>{formatPercent(latest?.tracking_error, 2)}</strong>
+          <div className="metric-source-row metric-compact-source">
+            <small>
+              {latest?.tracking_error_stale
+                ? "沿用上次有效值"
+                : latest?.tracking_error_as_of
+                ? `截至 ${latest.tracking_error_as_of}`
+                : "等待公开数据"}
+            </small>
+            <SourceLink href={latest?.tracking_error_source_url} />
+          </div>
         </div>
       </div>
       <div
@@ -1317,6 +1368,7 @@ function FundCard({
           <div className="metric-source-row">
             <small>
               {exchangeTraded ? "按最新份额与净值估算" : "最近公开规模"}
+              {wasCarried(latest, "fund_scale") ? " · 沿用上次有效值" : ""}
             </small>
             <SourceLink href={latest?.fund_scale_source_url} />
           </div>
@@ -1329,6 +1381,9 @@ function FundCard({
               {latest?.fund_manager || "管理人未公布"}
               {latest?.qdii_quota_date
                 ? ` · 截至 ${latest.qdii_quota_date}`
+                : ""}
+              {wasCarried(latest, "manager_qdii_quota_usd")
+                ? " · 沿用上次有效值"
                 : ""}
             </small>
             <SourceLink href={latest?.qdii_quota_source_url} />
@@ -1376,7 +1431,7 @@ function AddFundDialog({
     name: "",
     exchange_code: "",
     category: "QDII",
-    benchmark: "纳斯达克",
+    benchmark: "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1451,9 +1506,9 @@ function AddFundDialog({
             </select>
           </label>
           <label>
-            跟踪指数
+            跟踪标的（可选）
             <input
-              placeholder="AKShare 全球指数名称"
+              placeholder="留空则首次同步自动补充"
               value={form.benchmark}
               maxLength={80}
               onChange={(event) =>
@@ -1463,7 +1518,7 @@ function AddFundDialog({
           </label>
         </div>
         <p className="form-hint">
-          跟踪指数需使用公开数据源中的指数名称；样本不足30个重合交易日时，不计算跟踪误差。
+          年化跟踪误差与跟踪标的均读取公开数据，并展示来源、截止日期及过期状态。
         </p>
         <div className="dialog-actions">
           <button className="secondary-button" type="button" onClick={onClose}>
@@ -1571,15 +1626,18 @@ function FundHistoryDialog({
           {latest?.source && <small>来源：{latest.source}</small>}
         </div>
         <div>
-          <span>单日限额</span>
+          <span>直销单日额度</span>
           <strong>{formatDailyLimit(fund)}</strong>
           {fund.limit_channel && (
-            <small>
-              公告口径：{fund.limit_channel}
-              {fund.limit_effective_date
-                ? ` · ${fund.limit_effective_date} 生效`
-                : ""}
-            </small>
+            <div className="metric-source-row">
+              <small>
+                {fund.limit_channel}
+                {fund.limit_effective_date
+                  ? ` · ${fund.limit_effective_date} 生效`
+                  : ""}
+              </small>
+              <SourceLink href={fund.limit_source_url} label="直销公告" />
+            </div>
           )}
         </div>
         <div>
@@ -1599,9 +1657,18 @@ function FundHistoryDialog({
           </small>
         </div>
         <div>
-          <span>60日跟踪误差</span>
+          <span>公开年化跟踪误差</span>
           <strong>{formatPercent(latest?.tracking_error, 2)}</strong>
-          <small>{fund.benchmark ? `基准：${fund.benchmark}` : "未设置基准"}</small>
+          <div className="metric-source-row">
+            <small>
+              {latest?.tracking_error_method || "等待公开数据"}
+              {latest?.tracking_error_as_of
+                ? ` · 截至 ${latest.tracking_error_as_of}`
+                : ""}
+              {latest?.tracking_error_stale ? " · 沿用上次有效值" : ""}
+            </small>
+            <SourceLink href={latest?.tracking_error_source_url} />
+          </div>
         </div>
       </div>
       <div
@@ -1651,14 +1718,14 @@ function FundHistoryDialog({
             <thead>
               <tr>
                 <th>业务日期</th>
-                <th>状态 / 限额</th>
+                <th>申购状态</th>
                 <th>基金规模</th>
                 <th>管理人外汇额度</th>
                 <th>估值</th>
                 <th>净值</th>
                 <th>场内价格</th>
                 <th>溢价</th>
-                <th>跟踪误差</th>
+                <th>公开年化跟踪误差</th>
                 <th />
               </tr>
             </thead>
@@ -1671,7 +1738,6 @@ function FundHistoryDialog({
                   </td>
                   <td>
                     {item.purchase_status || "—"}
-                    <small>{formatSnapshotDailyLimit(item)}</small>
                   </td>
                   <td>
                     <div className="table-source-cell">
@@ -1689,7 +1755,15 @@ function FundHistoryDialog({
                   <td>{formatValue(item.nav)}</td>
                   <td>{formatValue(item.market_price)}</td>
                   <td>{formatPercent(item.premium, 2)}</td>
-                  <td>{formatPercent(item.tracking_error, 2)}</td>
+                  <td>
+                    <div className="table-source-cell">
+                      <span>
+                        {formatPercent(item.tracking_error, 2)}
+                        {item.tracking_error_stale ? " · 过期" : ""}
+                      </span>
+                      <SourceLink href={item.tracking_error_source_url} />
+                    </div>
+                  </td>
                   <td>
                     <button
                       className="text-button"

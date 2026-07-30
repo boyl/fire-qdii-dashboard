@@ -1093,7 +1093,7 @@ tbody tr:last-child td {
   white-space: nowrap;
 }
 
-.limit-sort {
+.fund-sort {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1103,14 +1103,14 @@ tbody tr:last-child td {
   background: rgba(255, 255, 255, 0.55);
 }
 
-.limit-sort span {
+.fund-sort span {
   color: var(--accent);
   font: 500 7px/1 "DM Mono", monospace;
   letter-spacing: 0.1em;
   white-space: nowrap;
 }
 
-.limit-sort select {
+.fund-sort select {
   min-width: 92px;
   padding: 5px 23px 5px 8px;
   border: 0;
@@ -1122,7 +1122,7 @@ tbody tr:last-child td {
   cursor: pointer;
 }
 
-.limit-sort select:focus-visible {
+.fund-sort select:focus-visible {
   box-shadow: 0 0 0 2px rgba(222, 100, 69, 0.28);
 }
 
@@ -1380,6 +1380,19 @@ tbody tr:last-child td {
 .fund-metrics strong {
   margin-top: 4px;
   font: 500 11px/1.2 "DM Mono", monospace;
+}
+
+.fund-metrics .metric-compact-source {
+  margin-top: 4px;
+  gap: 4px;
+}
+
+.fund-metrics .metric-compact-source small {
+  overflow: hidden;
+  color: #919793;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fund-profile-strip {
@@ -2147,7 +2160,7 @@ tbody tr:last-child td {
     justify-content: space-between;
   }
 
-  .limit-sort {
+  .fund-sort {
     flex: 1;
     justify-content: space-between;
   }

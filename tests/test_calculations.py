@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, timedelta
+from datetime import date
 
 from server.calculations import (
     portfolio_summary,
     premium_rate,
     stress_portfolio,
     sustainability_runway,
-    tracking_error,
 )
 
 
@@ -58,25 +57,6 @@ class PortfolioCalculationsTest(unittest.TestCase):
         premium, basis = premium_rate(1.10, 1.00, 0.90)
         self.assertEqual(basis, "IOPV")
         self.assertAlmostEqual(premium, 10)
-
-    def test_tracking_error_needs_30_overlapping_returns(self):
-        start = date(2025, 1, 1)
-        fund = {}
-        benchmark = {}
-        for index in range(65):
-            key = (start + timedelta(days=index)).isoformat()
-            benchmark[key] = 100 * (1.001**index)
-            fund[key] = 100 * (1.0012**index)
-        error = tracking_error(fund, benchmark)
-        self.assertIsNotNone(error)
-        self.assertGreaterEqual(error, 0)
-        self.assertIsNone(
-            tracking_error(
-                dict(list(fund.items())[:20]),
-                dict(list(benchmark.items())[:20]),
-            )
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

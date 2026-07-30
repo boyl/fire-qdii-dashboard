@@ -70,17 +70,37 @@ test("shows fund scale and manager QDII quota", async () => {
   assert.match(types, /qdii_quota_source_url: string \| null/);
 });
 
-test("sorts off-exchange funds by daily purchase limit before pagination", async () => {
+test("shows published tracking error with provenance and freshness", async () => {
   const source = await readFile(new URL("src/App.tsx", root), "utf8");
-  assert.match(source, /type LimitSort = "default" \| "descending" \| "ascending"/);
-  assert.match(source, /function sortByDailyLimit/);
-  assert.match(source, /rightLimit - leftLimit/);
-  assert.match(source, /leftLimit - rightLimit/);
-  assert.match(source, /aria-label="按单日申购额度排序"/);
-  assert.match(source, /useState<LimitSort>\("descending"\)/);
-  assert.match(source, /channel_daily_limit \?\? fund\.latest\?\.daily_limit/);
-  assert.match(source, /公告口径/);
-  assert.match(source, /sortByDailyLimit\([\s\S]*funds\.filter/);
+  const types = await readFile(new URL("src/types.ts", root), "utf8");
+  assert.match(source, /公开年化跟踪误差/);
+  assert.doesNotMatch(source, /60日跟踪误差/);
+  assert.match(source, /tracking_error_source_url/);
+  assert.match(source, /tracking_error_stale/);
+  assert.match(source, /部分字段沿用上次有效值/);
+  assert.match(types, /tracking_error_as_of: string \| null/);
+  assert.match(types, /carried_fields: string\[\]/);
+});
+
+test("sorts funds by direct-channel limit or published tracking error before pagination", async () => {
+  const source = await readFile(new URL("src/App.tsx", root), "utf8");
+  assert.match(source, /type FundSort =/);
+  assert.match(source, /function sortFunds/);
+  assert.match(source, /rightValue - leftValue/);
+  assert.match(source, /leftValue - rightValue/);
+  assert.match(source, /aria-label={`按\$\{group\.title\}数据排序`}/);
+  assert.match(source, /"off-exchange": "limit-descending"/);
+  assert.match(source, /"exchange-traded": "default"/);
+  assert.match(source, /return fund\.channel_daily_limit/);
+  assert.match(source, /fund\.latest\?\.tracking_error_stale/);
+  assert.match(source, /fund\.latest\?\.tracking_error/);
+  assert.doesNotMatch(source, /channel_daily_limit \?\? fund\.latest\?\.daily_limit/);
+  assert.match(source, /跟踪误差低 → 高/);
+  assert.match(source, /跟踪误差高 → 低/);
+  assert.match(source, /直销单日额度/);
+  assert.match(source, /等待核实基金公司直销公告/);
+  assert.match(source, /href=\{fund\.limit_source_url\} label="直销公告"/);
+  assert.match(source, /sortFunds\([\s\S]*funds\.filter/);
   assert.match(source, /visibleFunds: group\.funds\.slice/);
   assert.match(source, /"off-exchange": 1/);
 });

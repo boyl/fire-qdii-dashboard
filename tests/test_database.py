@@ -71,6 +71,13 @@ class DatabaseTest(unittest.TestCase):
                 "fund_scale": 2_176_000_000,
                 "fund_scale_source_url": "https://example.com/fund/539001",
                 "fund_manager": "建信基金管理有限责任公司",
+                "tracking_error": 2.26,
+                "tracking_error_source_url": (
+                    "https://fundf10.eastmoney.com/tsdata_539001.html"
+                ),
+                "tracking_error_as_of": "2026-07-28",
+                "tracking_error_method": "东方财富 Choice 公布年化跟踪误差",
+                "tracking_error_stale": False,
                 "manager_qdii_quota_usd": 1_770_000_000,
                 "qdii_quota_date": "2026-06-30",
                 "qdii_quota_source_url": "https://example.com/qdii.pdf",
@@ -89,6 +96,12 @@ class DatabaseTest(unittest.TestCase):
             1_770_000_000,
         )
         self.assertEqual(latest["qdii_quota_date"], "2026-06-30")
+        self.assertEqual(latest["tracking_error"], 2.26)
+        self.assertFalse(latest["tracking_error_stale"])
+        self.assertEqual(
+            latest["tracking_error_source_url"],
+            "https://fundf10.eastmoney.com/tsdata_539001.html",
+        )
         self.assertEqual(
             latest["qdii_quota_source_url"],
             "https://example.com/qdii.pdf",
@@ -100,7 +113,7 @@ class DatabaseTest(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-        self.assertEqual(versions, [1, 2, 3, 4])
+        self.assertEqual(versions, [1, 2, 3, 4, 5])
 
     def test_backfills_trace_links_from_existing_snapshot_metadata(self):
         self.database.upsert_fund(

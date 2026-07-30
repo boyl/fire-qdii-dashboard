@@ -80,6 +80,10 @@ export interface FundSnapshot {
   premium: number | null;
   premium_basis: string | null;
   tracking_error: number | null;
+  tracking_error_source_url: string | null;
+  tracking_error_as_of: string | null;
+  tracking_error_method: string | null;
+  tracking_error_stale: boolean;
   purchase_status: string | null;
   daily_limit: number | null;
   fund_scale: number | null;
@@ -93,6 +97,7 @@ export interface FundSnapshot {
   stale: boolean;
   corrected: boolean;
   correction_note: string | null;
+  carried_fields: string[];
 }
 
 export interface FundWatch {

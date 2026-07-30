@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-import statistics
 from datetime import date
 from typing import Iterable, Mapping, Sequence
 
@@ -168,31 +166,3 @@ def premium_rate(
     if basis in (None, 0):
         return None, None
     return round((float(market_price) - float(basis)) / float(basis) * 100, 4), basis_name
-
-
-def tracking_error(
-    fund_values: Mapping[str, float],
-    benchmark_values: Mapping[str, float],
-    *,
-    min_samples: int = 30,
-    window: int = 60,
-) -> float | None:
-    common_dates = sorted(set(fund_values).intersection(benchmark_values))
-    differences = []
-    for previous_date, current_date in zip(common_dates, common_dates[1:]):
-        previous_fund = float(fund_values[previous_date])
-        current_fund = float(fund_values[current_date])
-        previous_benchmark = float(benchmark_values[previous_date])
-        current_benchmark = float(benchmark_values[current_date])
-        if previous_fund <= 0 or previous_benchmark <= 0:
-            continue
-        differences.append(
-            current_fund / previous_fund
-            - current_benchmark / previous_benchmark
-        )
-    if len(differences) < min_samples:
-        return None
-    differences = differences[-window:]
-    if len(differences) < 2:
-        return None
-    return round(statistics.stdev(differences) * math.sqrt(252) * 100, 4)

@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 import httpx
 from pypdf import PdfReader
 
-from .calculations import premium_rate, tracking_error
+from .calculations import premium_rate
 
 
 SAFE_QDII_PAGE = "https://www.safe.gov.cn/safe/2018/0425/16849.html"
@@ -123,11 +123,25 @@ def _parse_eastmoney_basic_html(text: str) -> dict[str, str]:
         text,
         flags=re.IGNORECASE,
     )
+    tracking_error_match = re.search(
+        r"年化跟踪误差[：:]?</a>\s*([0-9]+(?:\.[0-9]+)?)%",
+        text,
+        flags=re.IGNORECASE,
+    )
+    benchmark_match = re.search(
+        r"跟踪标的[：:]?</a>\s*([^<|]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
     result: dict[str, str] = {}
     if scale_match:
         result["最新规模"] = f"{scale_match.group(1)}亿"
     if manager_match:
         result["基金公司"] = unescape(manager_match.group(1)).strip()
+    if tracking_error_match:
+        result["公开年化跟踪误差"] = tracking_error_match.group(1)
+    if benchmark_match:
+        result["公开跟踪标的"] = unescape(benchmark_match.group(1)).strip()
     return result
 
 
@@ -181,6 +195,8 @@ def _notice_limit(text: str) -> float | None:
     compact = re.sub(r"\s+", "", text or "")
     patterns = (
         r"该(?:分级)?基金份额的限制(?:申购)?金额(?:（单位：元）)?[:：]?([0-9][\d,.]*)(万|亿)?元?",
+        r"限制申购(?:（[^）]*）|\([^)]*\))?金额(?:（单位：人民币元）)?[:：]?([0-9][\d,.]*)(万|亿)?元?",
+        r"累计金额限制调整为[:：]?([0-9][\d,.]*)(万|亿)?元",
         r"业务限额为[:：]?([0-9][\d,.]*)(万|亿)?元",
         r"调整后限额(?:为)?[:：]?([0-9][\d,.]*)(万|亿)?元",
         r"限额为[:：]?([0-9][\d,.]*)(万|亿)?元",
@@ -193,6 +209,28 @@ def _notice_limit(text: str) -> float | None:
         multiplier = {"万": 10_000, "亿": 100_000_000}.get(match.group(2), 1)
         return value * multiplier
     return None
+
+
+def _direct_notice_limit(text: str) -> tuple[float | None, bool]:
+    compact = re.sub(r"\s+", "", text or "")
+    direct_prefix = r"(?:本公司|基金公司|建信基金)?直销(?:机构|渠道|柜台|电子交易平台|平台)"
+    direct_patterns = (
+        direct_prefix
+        + r".{0,300}?"
+        + r"(?:金额应不超过|金额不超过|业务限额为|限额为|限制申购金额)"
+        + r"[:：]?([0-9][\d,.]*)(万|亿)?元",
+        direct_prefix
+        + r".{0,300}?(?:累计)?(?:高于|超过)([0-9][\d,.]*)(万|亿)?元",
+    )
+    for pattern in direct_patterns:
+        direct_match = re.search(pattern, compact)
+        if direct_match:
+            value = float(direct_match.group(1).replace(",", ""))
+            multiplier = {"万": 10_000, "亿": 100_000_000}.get(
+                direct_match.group(2), 1
+            )
+            return value * multiplier, True
+    return _notice_limit(text), False
 
 
 def _notice_effective_date(text: str) -> date | None:
@@ -270,7 +308,7 @@ class AKShareProvider:
                 effective_date = _notice_effective_date(content)
                 if effective_date and effective_date > date.today():
                     continue
-                limit = _notice_limit(content)
+                limit, direct_specific = _direct_notice_limit(content)
                 if limit is not None and limit > 0:
                     return limit, {
                         "report_id": report_id,
@@ -281,7 +319,22 @@ class AKShareProvider:
                         ),
                         "limit": limit,
                         "attachment": content_data.get("attach_url"),
+                        "limit_channel": (
+                            "基金公司直销渠道"
+                            if direct_specific
+                            else "基金公司直销渠道（全渠道公告）"
+                        ),
                     }
+                return None, {
+                    "report_id": report_id,
+                    "title": title,
+                    "notice_date": content_data.get("notice_date"),
+                    "effective_date": (
+                        effective_date.isoformat() if effective_date else None
+                    ),
+                    "attachment": content_data.get("attach_url"),
+                    "result": "unparsed",
+                }
         return None, None
 
     @staticmethod
@@ -348,6 +401,8 @@ class AKShareProvider:
         basic_sources: dict[str, str] = {}
         basic_source_urls: dict[str, str] = {}
         basic_errors: dict[str, str] = {}
+        public_metrics: dict[str, dict[str, str]] = {}
+        public_metric_errors: dict[str, str] = {}
         qdii_quotas: dict[str, float] = {}
         qdii_quota_date: str | None = None
         qdii_quota_raw: dict | None = None
@@ -378,6 +433,13 @@ class AKShareProvider:
         off_exchange_watches = [
             watch for watch in watches if not watch.get("exchange_code")
         ]
+        if mode in {"evening", "full"}:
+            for watch in watches:
+                code = str(watch["fund_code"]).zfill(6)
+                try:
+                    public_metrics[code] = self._fetch_eastmoney_basic(code)
+                except Exception as exc:
+                    public_metric_errors[code] = str(exc)
         if exchange_codes and mode in {"evening", "full"}:
             try:
                 etf_rows = _rows_by_code(ak.fund_etf_spot_em(), ("代码",))
@@ -400,7 +462,10 @@ class AKShareProvider:
                     )
                 except Exception as exc:
                     try:
-                        basic_rows[code] = self._fetch_eastmoney_basic(code)
+                        basic_rows[code] = (
+                            public_metrics.get(code)
+                            or self._fetch_eastmoney_basic(code)
+                        )
                         basic_sources[code] = "天天基金"
                         basic_source_urls[code] = (
                             f"https://fund.eastmoney.com/{code}.html"
@@ -434,9 +499,13 @@ class AKShareProvider:
             errors = list(batch_errors)
             if code in basic_errors:
                 errors.append(f"基金规模：{basic_errors[code]}")
+            if code in public_metric_errors:
+                errors.append(
+                    f"公开年化跟踪误差：{public_metric_errors[code]}"
+                )
             basic = basic_rows.get(code) or {}
+            public_metric = public_metrics.get(code) or {}
             fund_values: dict[str, float] = {}
-            benchmark_values: dict[str, float] = {}
             nav = _number(
                 _pick(
                     estimate_row,
@@ -466,18 +535,6 @@ class AKShareProvider:
                         nav = fund_values[latest_date]
                 except Exception as exc:
                     errors.append(f"历史净值：{exc}")
-
-                benchmark = watch.get("benchmark")
-                if benchmark:
-                    try:
-                        benchmark_frame = ak.index_global_hist_em(symbol=benchmark)
-                        benchmark_values = _series_from_frame(
-                            benchmark_frame,
-                            ("日期", "date"),
-                            ("最新价", "收盘价", "close"),
-                        )
-                    except Exception as exc:
-                        errors.append(f"跟踪指数：{exc}")
 
             estimate = _number(
                 _pick(estimate_row, "估算数据-估算值", "估算值")
@@ -512,18 +569,19 @@ class AKShareProvider:
             purchase_status = _text(_pick(purchase, "申购状态"))
             daily_limit = _number(_pick(purchase, "日累计限定金额"))
             limit_notice = None
+            direct_daily_limit = None
             if (
                 mode in {"morning", "full"}
-                and (daily_limit is None or daily_limit <= 0)
-                and purchase_status
-                and "限" in purchase_status
+                and not exchange_code
             ):
                 try:
                     notice_limit, limit_notice = self._fetch_notice_limit(code)
                     if notice_limit is not None:
-                        daily_limit = notice_limit
+                        direct_daily_limit = notice_limit
+                        if daily_limit is None or daily_limit <= 0:
+                            daily_limit = notice_limit
                 except Exception as exc:
-                    errors.append(f"限额公告：{exc}")
+                    errors.append(f"直销限额公告：{exc}")
 
             output[code] = {
                 "fund_code": code,
@@ -544,13 +602,38 @@ class AKShareProvider:
                 "iopv": iopv,
                 "premium": premium,
                 "premium_basis": premium_basis,
-                "tracking_error": tracking_error(
-                    fund_values, benchmark_values
-                )
-                if benchmark_values
-                else None,
+                "tracking_error": _number(
+                    public_metric.get("公开年化跟踪误差")
+                ),
+                "tracking_error_source_url": (
+                    f"https://fundf10.eastmoney.com/tsdata_{code}.html"
+                    if public_metric.get("公开年化跟踪误差")
+                    else None
+                ),
+                "tracking_error_as_of": (
+                    business_date
+                    if public_metric.get("公开年化跟踪误差")
+                    else None
+                ),
+                "tracking_error_method": (
+                    "东方财富 Choice 公布年化跟踪误差"
+                    if public_metric.get("公开年化跟踪误差")
+                    else None
+                ),
+                "tracking_error_stale": False,
+                "public_benchmark": public_metric.get("公开跟踪标的"),
                 "purchase_status": purchase_status,
                 "daily_limit": daily_limit,
+                "channel_daily_limit": direct_daily_limit,
+                "limit_channel": (
+                    limit_notice.get("limit_channel") if limit_notice else None
+                ),
+                "limit_source_url": (
+                    limit_notice.get("attachment") if limit_notice else None
+                ),
+                "limit_effective_date": (
+                    limit_notice.get("effective_date") if limit_notice else None
+                ),
                 "fund_scale": fund_scale,
                 "fund_scale_source_url": (
                     fund_scale_source_url if fund_scale is not None else None
@@ -580,6 +663,11 @@ class AKShareProvider:
                             if limit_notice and daily_limit
                             else []
                         ),
+                        *(
+                            ["东方财富 Choice"]
+                            if public_metric.get("公开年化跟踪误差")
+                            else []
+                        ),
                     ]
                 ),
                 "errors": errors,
@@ -588,6 +676,7 @@ class AKShareProvider:
                     "estimate": estimate_row,
                     "market": market,
                     "basic": basic,
+                    "public_metric": public_metric or None,
                     "qdii_quota": (
                         {
                             **(qdii_quota_raw or {}),
