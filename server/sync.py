@@ -49,6 +49,12 @@ def _carry_forward(collected: dict[str, Any], previous: dict | None) -> dict:
         "tracking_error",
         "purchase_status",
         "daily_limit",
+        "fund_scale",
+        "fund_scale_source_url",
+        "fund_manager",
+        "manager_qdii_quota_usd",
+        "qdii_quota_date",
+        "qdii_quota_source_url",
     )
     for field in carry_fields:
         if collected.get(field) is None:
@@ -105,6 +111,8 @@ class SyncService:
                     "nav",
                     "market_price",
                     "iopv",
+                    "fund_scale",
+                    "manager_qdii_quota_usd",
                 )
                 has_fresh_data = any(
                     collected.get(field) is not None for field in fresh_fields

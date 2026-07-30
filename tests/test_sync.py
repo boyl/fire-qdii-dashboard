@@ -36,6 +36,12 @@ class FakeProvider:
                 "tracking_error": None,
                 "purchase_status": self.status,
                 "daily_limit": self.limit,
+                "fund_scale": 4_887_000_000,
+                "fund_scale_source_url": "https://example.com/fund/000834",
+                "fund_manager": "测试基金管理有限公司",
+                "manager_qdii_quota_usd": 1_560_000_000,
+                "qdii_quota_date": "2026-06-30",
+                "qdii_quota_source_url": "https://example.com/qdii.pdf",
                 "source_time": now,
                 "source": self.name,
                 "errors": [],
@@ -88,6 +94,19 @@ class SyncTest(unittest.TestCase):
         latest = self.database.latest_fund_snapshot("000834")
         self.assertTrue(latest["stale"])
         self.assertEqual(latest["nav"], 1.01)
+        self.assertEqual(latest["fund_scale"], 4_887_000_000)
+        self.assertEqual(
+            latest["fund_scale_source_url"],
+            "https://example.com/fund/000834",
+        )
+        self.assertEqual(
+            latest["manager_qdii_quota_usd"],
+            1_560_000_000,
+        )
+        self.assertEqual(
+            latest["qdii_quota_source_url"],
+            "https://example.com/qdii.pdf",
+        )
 
 
 if __name__ == "__main__":

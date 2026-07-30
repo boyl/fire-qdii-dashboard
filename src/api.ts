@@ -99,6 +99,10 @@ export const api = {
     exchange_code?: string;
     category: string;
     benchmark?: string;
+    channel_daily_limit?: number;
+    limit_channel?: string;
+    limit_source_url?: string;
+    limit_effective_date?: string;
   }) => {
     const normalized = {
       ...payload,

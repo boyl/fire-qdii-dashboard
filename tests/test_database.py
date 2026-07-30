@@ -41,6 +41,10 @@ class DatabaseTest(unittest.TestCase):
                 "name": "测试基金",
                 "category": "QDII",
                 "benchmark": "纳斯达克",
+                "channel_daily_limit": 10_000,
+                "limit_channel": "基金公告口径",
+                "limit_source_url": "https://example.com/notice",
+                "limit_effective_date": "2026-06-22",
             }
         )
         backup = self.database.export_data()
@@ -48,7 +52,87 @@ class DatabaseTest(unittest.TestCase):
         second.initialize()
         restored = second.restore_data(backup)
         self.assertEqual(restored["funds"], 1)
-        self.assertEqual(second.list_funds()[0]["fund_code"], "000834")
+        fund = second.list_funds()[0]
+        self.assertEqual(fund["fund_code"], "000834")
+        self.assertEqual(fund["channel_daily_limit"], 10_000)
+        self.assertEqual(fund["limit_channel"], "基金公告口径")
+
+    def test_fund_scale_and_qdii_quota_round_trip(self):
+        self.database.upsert_fund(
+            {
+                "fund_code": "539001",
+                "name": "建信纳斯达克100",
+                "category": "QDII",
+            }
+        )
+        self.database.save_fund_snapshot(
+            {
+                "fund_code": "539001",
+                "fund_scale": 2_176_000_000,
+                "fund_scale_source_url": "https://example.com/fund/539001",
+                "fund_manager": "建信基金管理有限责任公司",
+                "manager_qdii_quota_usd": 1_770_000_000,
+                "qdii_quota_date": "2026-06-30",
+                "qdii_quota_source_url": "https://example.com/qdii.pdf",
+                "source_time": "2026-07-29T00:00:00+00:00",
+                "source": "test",
+            }
+        )
+        latest = self.database.latest_fund_snapshot("539001")
+        self.assertEqual(latest["fund_scale"], 2_176_000_000)
+        self.assertEqual(
+            latest["fund_scale_source_url"],
+            "https://example.com/fund/539001",
+        )
+        self.assertEqual(
+            latest["manager_qdii_quota_usd"],
+            1_770_000_000,
+        )
+        self.assertEqual(latest["qdii_quota_date"], "2026-06-30")
+        self.assertEqual(
+            latest["qdii_quota_source_url"],
+            "https://example.com/qdii.pdf",
+        )
+        with self.database.connect() as connection:
+            versions = [
+                row["version"]
+                for row in connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            ]
+        self.assertEqual(versions, [1, 2, 3, 4])
+
+    def test_backfills_trace_links_from_existing_snapshot_metadata(self):
+        self.database.upsert_fund(
+            {
+                "fund_code": "021000",
+                "name": "南方纳斯达克100",
+                "category": "QDII",
+            }
+        )
+        self.database.save_fund_snapshot(
+            {
+                "fund_code": "021000",
+                "fund_scale": 3_136_000_000,
+                "manager_qdii_quota_usd": 6_080_000_000,
+                "source": "AKShare / 东方财富 + 天天基金 + 国家外汇管理局",
+                "raw": {
+                    "qdii_quota": {
+                        "attachment": "https://example.com/safe-qdii.pdf",
+                    }
+                },
+            }
+        )
+        self.database.initialize()
+        latest = self.database.latest_fund_snapshot("021000")
+        self.assertEqual(
+            latest["fund_scale_source_url"],
+            "https://fund.eastmoney.com/021000.html",
+        )
+        self.assertEqual(
+            latest["qdii_quota_source_url"],
+            "https://example.com/safe-qdii.pdf",
+        )
 
 
 if __name__ == "__main__":

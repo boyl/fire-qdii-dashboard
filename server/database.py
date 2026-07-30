@@ -13,7 +13,7 @@ from typing import Any, Iterator, Sequence
 from .calculations import ASSET_KEYS, premium_rate
 from .config import DATABASE_PATH
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -92,6 +92,10 @@ class Database:
                 exchange_code TEXT,
                 category TEXT NOT NULL DEFAULT 'QDII',
                 benchmark TEXT,
+                channel_daily_limit_cents INTEGER,
+                limit_channel TEXT,
+                limit_source_url TEXT,
+                limit_effective_date TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -112,6 +116,12 @@ class Database:
                 tracking_error REAL,
                 purchase_status TEXT,
                 daily_limit_cents INTEGER,
+                fund_scale_cents INTEGER,
+                fund_scale_source_url TEXT,
+                fund_manager TEXT,
+                manager_qdii_quota_usd_cents INTEGER,
+                qdii_quota_date TEXT,
+                qdii_quota_source_url TEXT,
                 source_time TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'AKShare/Eastmoney',
                 stale INTEGER NOT NULL DEFAULT 0,
@@ -169,7 +179,100 @@ class Database:
                 connection.execute(statement)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (1, utc_now()),
+            )
+            snapshot_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(fund_snapshots)"
+                ).fetchall()
+            }
+            migrations = {
+                "fund_scale_cents": "INTEGER",
+                "fund_manager": "TEXT",
+                "manager_qdii_quota_usd_cents": "INTEGER",
+                "qdii_quota_date": "TEXT",
+            }
+            for column, column_type in migrations.items():
+                if column not in snapshot_columns:
+                    connection.execute(
+                        f"ALTER TABLE fund_snapshots ADD COLUMN {column} {column_type}"
+                    )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (2, utc_now()),
+            )
+            watch_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(fund_watches)"
+                ).fetchall()
+            }
+            watch_migrations = {
+                "channel_daily_limit_cents": "INTEGER",
+                "limit_channel": "TEXT",
+                "limit_source_url": "TEXT",
+                "limit_effective_date": "TEXT",
+            }
+            for column, column_type in watch_migrations.items():
+                if column not in watch_columns:
+                    connection.execute(
+                        f"ALTER TABLE fund_watches ADD COLUMN {column} {column_type}"
+                    )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (3, utc_now()),
+            )
+            snapshot_source_migrations = {
+                "fund_scale_source_url": "TEXT",
+                "qdii_quota_source_url": "TEXT",
+            }
+            for column, column_type in snapshot_source_migrations.items():
+                if column not in snapshot_columns:
+                    connection.execute(
+                        f"ALTER TABLE fund_snapshots ADD COLUMN {column} {column_type}"
+                    )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, utc_now()),
+            )
+            connection.execute(
+                """
+                UPDATE fund_snapshots
+                SET fund_scale_source_url = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM fund_watches
+                        WHERE fund_watches.fund_code = fund_snapshots.fund_code
+                          AND fund_watches.exchange_code IS NOT NULL
+                    ) THEN (
+                        SELECT 'https://quote.eastmoney.com/'
+                            || CASE
+                                WHEN substr(exchange_code, 1, 1) = '5' THEN 'sh'
+                                ELSE 'sz'
+                            END
+                            || exchange_code || '.html'
+                        FROM fund_watches
+                        WHERE fund_watches.fund_code = fund_snapshots.fund_code
+                    )
+                    WHEN source LIKE '%雪球基金%'
+                        THEN 'https://danjuanfunds.com/djapi/fund/' || fund_code
+                    WHEN source LIKE '%天天基金%'
+                        THEN 'https://fund.eastmoney.com/' || fund_code || '.html'
+                    ELSE NULL
+                END
+                WHERE fund_scale_source_url IS NULL
+                  AND fund_scale_cents IS NOT NULL
+                """
+            )
+            connection.execute(
+                """
+                UPDATE fund_snapshots
+                SET qdii_quota_source_url =
+                    json_extract(raw_json, '$.qdii_quota.attachment')
+                WHERE qdii_quota_source_url IS NULL
+                  AND manager_qdii_quota_usd_cents IS NOT NULL
+                  AND json_valid(raw_json)
+                """
             )
         self._ensure_defaults()
 
@@ -309,6 +412,14 @@ class Database:
             "tracking_error": row["tracking_error"],
             "purchase_status": row["purchase_status"],
             "daily_limit": from_cents(row["daily_limit_cents"]),
+            "fund_scale": from_cents(row["fund_scale_cents"]),
+            "fund_scale_source_url": row["fund_scale_source_url"],
+            "fund_manager": row["fund_manager"],
+            "manager_qdii_quota_usd": from_cents(
+                row["manager_qdii_quota_usd_cents"]
+            ),
+            "qdii_quota_date": row["qdii_quota_date"],
+            "qdii_quota_source_url": row["qdii_quota_source_url"],
             "source_time": row["source_time"],
             "source": row["source"],
             "stale": bool(row["stale"]),
@@ -340,6 +451,12 @@ class Database:
                         "exchange_code": row["exchange_code"],
                         "category": row["category"],
                         "benchmark": row["benchmark"],
+                        "channel_daily_limit": from_cents(
+                            row["channel_daily_limit_cents"]
+                        ),
+                        "limit_channel": row["limit_channel"],
+                        "limit_source_url": row["limit_source_url"],
+                        "limit_effective_date": row["limit_effective_date"],
                         "active": bool(row["active"]),
                         "created_at": row["created_at"],
                         "latest": self._snapshot_row(latest),
@@ -365,13 +482,30 @@ class Database:
                 """
                 INSERT INTO fund_watches(
                     fund_code, name, exchange_code, category, benchmark,
-                    active, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    channel_daily_limit_cents, limit_channel, limit_source_url,
+                    limit_effective_date, active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(fund_code) DO UPDATE SET
                     name=CASE WHEN excluded.name='' THEN fund_watches.name ELSE excluded.name END,
                     exchange_code=excluded.exchange_code,
                     category=excluded.category,
                     benchmark=excluded.benchmark,
+                    channel_daily_limit_cents=COALESCE(
+                        excluded.channel_daily_limit_cents,
+                        fund_watches.channel_daily_limit_cents
+                    ),
+                    limit_channel=COALESCE(
+                        excluded.limit_channel,
+                        fund_watches.limit_channel
+                    ),
+                    limit_source_url=COALESCE(
+                        excluded.limit_source_url,
+                        fund_watches.limit_source_url
+                    ),
+                    limit_effective_date=COALESCE(
+                        excluded.limit_effective_date,
+                        fund_watches.limit_effective_date
+                    ),
                     active=1,
                     updated_at=excluded.updated_at
                 """,
@@ -381,6 +515,10 @@ class Database:
                     values.get("exchange_code") or None,
                     values.get("category", "QDII"),
                     values.get("benchmark") or None,
+                    to_cents(values.get("channel_daily_limit")),
+                    values.get("limit_channel") or None,
+                    values.get("limit_source_url") or None,
+                    values.get("limit_effective_date") or None,
                     now,
                     now,
                 ),
@@ -414,9 +552,12 @@ class Database:
                 INSERT INTO fund_snapshots(
                     fund_code, business_date, estimate, nav, estimate_error,
                     market_price, iopv, premium, premium_basis, tracking_error,
-                    purchase_status, daily_limit_cents, source_time, source,
-                    stale, corrected, correction_note, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+                    purchase_status, daily_limit_cents, fund_scale_cents,
+                    fund_scale_source_url, fund_manager,
+                    manager_qdii_quota_usd_cents, qdii_quota_date,
+                    qdii_quota_source_url, source_time, source, stale,
+                    corrected, correction_note, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
                 """,
                 (
                     values["fund_code"],
@@ -431,6 +572,12 @@ class Database:
                     values.get("tracking_error"),
                     values.get("purchase_status"),
                     to_cents(values.get("daily_limit")),
+                    to_cents(values.get("fund_scale")),
+                    values.get("fund_scale_source_url"),
+                    values.get("fund_manager"),
+                    to_cents(values.get("manager_qdii_quota_usd")),
+                    values.get("qdii_quota_date"),
+                    values.get("qdii_quota_source_url"),
                     values.get("source_time", utc_now()),
                     values.get("source", "AKShare/Eastmoney"),
                     1 if values.get("stale") else 0,
@@ -471,6 +618,10 @@ class Database:
             "market_price": "market_price",
             "purchase_status": "purchase_status",
             "daily_limit": "daily_limit_cents",
+            "fund_scale": "fund_scale_cents",
+            "fund_manager": "fund_manager",
+            "manager_qdii_quota_usd": "manager_qdii_quota_usd_cents",
+            "qdii_quota_date": "qdii_quota_date",
         }
         assignments = []
         params: list[Any] = []
@@ -478,7 +629,10 @@ class Database:
             if key in values and values[key] is not None:
                 assignments.append(f"{column}=?")
                 params.append(
-                    to_cents(values[key]) if key == "daily_limit" else values[key]
+                    to_cents(values[key])
+                    if key
+                    in {"daily_limit", "fund_scale", "manager_qdii_quota_usd"}
+                    else values[key]
                 )
         assignments.extend(["corrected=1", "correction_note=?"])
         params.append(values["correction_note"])
@@ -662,6 +816,16 @@ class Database:
                 "name_or_note",
                 "status",
                 "daily_limit_cny",
+                "channel_daily_limit_cny",
+                "limit_channel",
+                "limit_source_url",
+                "limit_effective_date",
+                "fund_scale_cny",
+                "fund_scale_source_url",
+                "fund_manager",
+                "manager_qdii_quota_usd",
+                "qdii_quota_date",
+                "qdii_quota_source_url",
                 "nav",
                 "estimate",
                 "market_price",
@@ -693,6 +857,16 @@ class Database:
                         fund["name"],
                         item["purchase_status"],
                         item["daily_limit"],
+                        fund["channel_daily_limit"],
+                        fund["limit_channel"],
+                        fund["limit_source_url"],
+                        fund["limit_effective_date"],
+                        item["fund_scale"],
+                        item["fund_scale_source_url"],
+                        item["fund_manager"],
+                        item["manager_qdii_quota_usd"],
+                        item["qdii_quota_date"],
+                        item["qdii_quota_source_url"],
                         item["nav"],
                         item["estimate"],
                         item["market_price"],
@@ -716,7 +890,14 @@ class Database:
             self.save_asset_snapshot(values)
             restored["assets"] += 1
         for row in payload.get("fund_watches", []):
-            self.upsert_fund(row)
+            self.upsert_fund(
+                {
+                    **row,
+                    "channel_daily_limit": from_cents(
+                        row.get("channel_daily_limit_cents")
+                    ),
+                }
+            )
             if not row.get("active", 1):
                 self.deactivate_fund(row["fund_code"])
             restored["funds"] += 1
@@ -735,6 +916,12 @@ class Database:
                     "tracking_error",
                     "purchase_status",
                     "daily_limit_cents",
+                    "fund_scale_cents",
+                    "fund_scale_source_url",
+                    "fund_manager",
+                    "manager_qdii_quota_usd_cents",
+                    "qdii_quota_date",
+                    "qdii_quota_source_url",
                     "source_time",
                     "source",
                     "stale",

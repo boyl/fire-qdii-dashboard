@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -96,8 +97,21 @@ class FundPayload(BaseModel):
     )
     category: str = Field(default="QDII", max_length=30)
     benchmark: str | None = Field(default=None, max_length=80)
+    channel_daily_limit: float | None = Field(default=None, ge=0)
+    limit_channel: str | None = Field(default=None, max_length=80)
+    limit_source_url: str | None = Field(default=None, max_length=500)
+    limit_effective_date: str | None = Field(
+        default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"
+    )
 
-    @field_validator("exchange_code", "benchmark", mode="before")
+    @field_validator(
+        "exchange_code",
+        "benchmark",
+        "limit_channel",
+        "limit_source_url",
+        "limit_effective_date",
+        mode="before",
+    )
     @classmethod
     def empty_string_to_none(cls, value: Any) -> Any:
         if isinstance(value, str) and not value.strip():
@@ -118,6 +132,10 @@ class CorrectionPayload(BaseModel):
     nav: float | None = Field(default=None, ge=0)
     market_price: float | None = Field(default=None, ge=0)
     daily_limit: float | None = Field(default=None, ge=0)
+    fund_scale: float | None = Field(default=None, ge=0)
+    manager_qdii_quota_usd: float | None = Field(default=None, ge=0)
+    fund_manager: str | None = Field(default=None, max_length=100)
+    qdii_quota_date: str | None = Field(default=None, max_length=10)
     purchase_status: str | None = Field(default=None, max_length=50)
     correction_note: str = Field(min_length=2, max_length=300)
 
@@ -147,9 +165,16 @@ def configure_scheduler() -> None:
         )
 
     last_sync = database.last_sync_run()
-    today = datetime.now().date().isoformat()
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    last_sync_date = (
+        datetime.fromisoformat(last_sync["started_at"])
+        .astimezone(ZoneInfo(TIMEZONE))
+        .date()
+        if last_sync
+        else None
+    )
     if database.list_funds() and (
-        not last_sync or not str(last_sync["started_at"]).startswith(today)
+        not last_sync or last_sync_date != today
     ):
         scheduler.add_job(
             sync_service.run,

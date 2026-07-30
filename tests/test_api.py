@@ -74,10 +74,15 @@ class ApiIntegrationTest(unittest.TestCase):
                         "exchange_code": "",
                         "category": "QDII",
                         "benchmark": "纳斯达克",
+                        "channel_daily_limit": 10_000,
+                        "limit_channel": "公告口径",
+                        "limit_source_url": "https://example.com/notice",
+                        "limit_effective_date": "2026-06-22",
                     },
                 )
                 self.assertEqual(fund.status_code, 200)
                 self.assertIsNone(fund.json()["exchange_code"])
+                self.assertEqual(fund.json()["channel_daily_limit"], 10_000)
                 self.assertEqual(len(client.get("/api/funds").json()), 1)
 
                 backup = client.get("/api/export/json")

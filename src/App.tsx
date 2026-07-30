@@ -106,11 +106,54 @@ function formatPercent(value: number | null | undefined, digits = 1) {
   return value == null ? "—" : `${value.toFixed(digits)}%`;
 }
 
-function formatDailyLimit(snapshot: FundSnapshot | null | undefined) {
-  if (snapshot?.purchase_status?.includes("场内交易")) return "不适用";
-  return snapshot?.daily_limit == null
+function dailyLimitForFund(fund: FundWatch) {
+  return fund.channel_daily_limit ?? fund.latest?.daily_limit;
+}
+
+function formatDailyLimit(fund: FundWatch) {
+  if (isExchangeTraded(fund)) return "不适用";
+  const limit = dailyLimitForFund(fund);
+  return limit == null
+    ? "未公布"
+    : formatMoney(limit);
+}
+
+function formatSnapshotDailyLimit(snapshot: FundSnapshot) {
+  if (snapshot.purchase_status?.includes("场内交易")) return "不适用";
+  return snapshot.daily_limit == null
     ? "未公布"
     : formatMoney(snapshot.daily_limit);
+}
+
+function formatFundScale(value: number | null | undefined) {
+  return value == null ? "未公布" : `${number.format(value / 100_000_000)} 亿元`;
+}
+
+function formatQdiiQuota(value: number | null | undefined) {
+  return value == null ? "未公布" : `${number.format(value / 100_000_000)} 亿美元`;
+}
+
+function SourceLink({
+  href,
+  label = "来源",
+}: {
+  href: string | null | undefined;
+  label?: string;
+}) {
+  if (!href) return null;
+  return (
+    <a
+      className="source-link"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+      aria-label={`${label}（在新标签页打开）`}
+    >
+      {label} ↗
+    </a>
+  );
 }
 
 function isExchangeTraded(fund: FundWatch) {
@@ -122,6 +165,20 @@ function isExchangeTraded(fund: FundWatch) {
 }
 
 const FUND_PAGE_SIZE = 2;
+type LimitSort = "default" | "descending" | "ascending";
+
+function sortByDailyLimit(funds: FundWatch[], sort: LimitSort) {
+  if (sort === "default") return funds;
+  return [...funds].sort((left, right) => {
+    const leftLimit = dailyLimitForFund(left);
+    const rightLimit = dailyLimitForFund(right);
+    if (leftLimit == null) return rightLimit == null ? 0 : 1;
+    if (rightLimit == null) return -1;
+    return sort === "descending"
+      ? rightLimit - leftLimit
+      : leftLimit - rightLimit;
+  });
+}
 
 function localDate() {
   const now = new Date();
@@ -725,6 +782,7 @@ function QDIITracker() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [limitSort, setLimitSort] = useState<LimitSort>("descending");
   const [fundPages, setFundPages] = useState<Record<string, number>>({
     "off-exchange": 1,
     "exchange-traded": 1,
@@ -803,7 +861,10 @@ function QDIITracker() {
       eyebrow: "OFF-EXCHANGE",
       title: "场外基金",
       copy: "关注申购状态与每日限额",
-      funds: funds.filter((fund) => !isExchangeTraded(fund)),
+      funds: sortByDailyLimit(
+        funds.filter((fund) => !isExchangeTraded(fund)),
+        limitSort,
+      ),
     },
     {
       key: "exchange-traded",
@@ -892,7 +953,29 @@ function QDIITracker() {
                       <h3>{group.title}</h3>
                       <span>{group.copy}</span>
                     </div>
-                    <strong>{group.funds.length} 只</strong>
+                    <div className="watch-group-actions">
+                      {group.key === "off-exchange" && (
+                        <label className="limit-sort">
+                          <span>额度排序</span>
+                          <select
+                            aria-label="按单日申购额度排序"
+                            value={limitSort}
+                            onChange={(event) => {
+                              setLimitSort(event.target.value as LimitSort);
+                              setFundPages((current) => ({
+                                ...current,
+                                "off-exchange": 1,
+                              }));
+                            }}
+                          >
+                            <option value="descending">额度高 → 低</option>
+                            <option value="default">默认顺序</option>
+                            <option value="ascending">额度低 → 高</option>
+                          </select>
+                        </label>
+                      )}
+                      <strong>{group.funds.length} 只</strong>
+                    </div>
                   </div>
                   <div className="fund-grid">
                     {group.visibleFunds.map((fund) => (
@@ -1137,9 +1220,10 @@ function FundCard({
   const latest = fund.latest;
   const status = latest?.purchase_status || "等待同步";
   const exchangeTraded = isExchangeTraded(fund);
+  const effectiveLimit = dailyLimitForFund(fund);
   const relaxed =
     status.includes("开放") ||
-    (latest?.daily_limit != null && latest.daily_limit > 0);
+    (effectiveLimit != null && effectiveLimit > 0);
   return (
     <article
       className={`card fund-card ${
@@ -1183,10 +1267,16 @@ function FundCard({
         <strong>
           {exchangeTraded
             ? formatValue(latest?.market_price)
-            : formatDailyLimit(latest)}
+            : formatDailyLimit(fund)}
         </strong>
         <small>
-          {latest?.source_time
+          {fund.limit_channel
+            ? `${fund.limit_channel}${
+                fund.limit_effective_date
+                  ? ` · 生效于 ${fund.limit_effective_date}`
+                  : ""
+              }`
+            : latest?.source_time
             ? `采集于 ${new Date(latest.source_time).toLocaleString("zh-CN")}`
             : "等待首次采集"}
           {latest?.stale ? " · 数据已过期" : ""}
@@ -1217,6 +1307,33 @@ function FundCard({
           <span>60日跟踪误差</span>
           <strong>{formatPercent(latest?.tracking_error, 2)}</strong>
         </div>
+      </div>
+      <div
+        className={`fund-profile-strip ${exchangeTraded ? "single" : ""}`}
+      >
+        <div>
+          <span>基金规模</span>
+          <strong>{formatFundScale(latest?.fund_scale)}</strong>
+          <div className="metric-source-row">
+            <small>
+              {exchangeTraded ? "按最新份额与净值估算" : "最近公开规模"}
+            </small>
+            <SourceLink href={latest?.fund_scale_source_url} />
+          </div>
+        </div>
+        {!exchangeTraded && (
+          <div title="基金管理人整体累计获批额度，不代表本基金剩余可用额度">
+            <span>管理人 QDII 外汇额度</span>
+            <strong>{formatQdiiQuota(latest?.manager_qdii_quota_usd)}</strong>
+            <small>
+              {latest?.fund_manager || "管理人未公布"}
+              {latest?.qdii_quota_date
+                ? ` · 截至 ${latest.qdii_quota_date}`
+                : ""}
+            </small>
+            <SourceLink href={latest?.qdii_quota_source_url} />
+          </div>
+        )}
       </div>
       <div className="fund-foot">
         <span>
@@ -1455,7 +1572,15 @@ function FundHistoryDialog({
         </div>
         <div>
           <span>单日限额</span>
-          <strong>{formatDailyLimit(latest)}</strong>
+          <strong>{formatDailyLimit(fund)}</strong>
+          {fund.limit_channel && (
+            <small>
+              公告口径：{fund.limit_channel}
+              {fund.limit_effective_date
+                ? ` · ${fund.limit_effective_date} 生效`
+                : ""}
+            </small>
+          )}
         </div>
         <div>
           <span>估值 / 净值</span>
@@ -1479,6 +1604,38 @@ function FundHistoryDialog({
           <small>{fund.benchmark ? `基准：${fund.benchmark}` : "未设置基准"}</small>
         </div>
       </div>
+      <div
+        className={`fund-detail-profile ${
+          isExchangeTraded(fund) ? "single" : ""
+        }`}
+      >
+        <div>
+          <span>基金规模</span>
+          <strong>{formatFundScale(latest?.fund_scale)}</strong>
+          <div className="metric-source-row">
+            <small>
+              {isExchangeTraded(fund)
+                ? "最新份额 × 净值估算"
+                : "最近公开披露规模"}
+            </small>
+            <SourceLink href={latest?.fund_scale_source_url} />
+          </div>
+        </div>
+        {!isExchangeTraded(fund) && (
+          <div title="该数字为基金管理人整体累计获批额度，不是本基金的剩余可用额度">
+            <span>管理人 QDII 外汇额度</span>
+            <strong>{formatQdiiQuota(latest?.manager_qdii_quota_usd)}</strong>
+            <small>
+              {latest?.fund_manager || "管理人未公布"}
+              {latest?.qdii_quota_date
+                ? ` · 截至 ${latest.qdii_quota_date}`
+                : ""}
+              {" · 不代表本基金剩余额度"}
+            </small>
+            <SourceLink href={latest?.qdii_quota_source_url} />
+          </div>
+        )}
+      </div>
       <div className="detail-section-heading">
         <div>
           <p className="eyebrow">SNAPSHOT HISTORY</p>
@@ -1495,6 +1652,8 @@ function FundHistoryDialog({
               <tr>
                 <th>业务日期</th>
                 <th>状态 / 限额</th>
+                <th>基金规模</th>
+                <th>管理人外汇额度</th>
                 <th>估值</th>
                 <th>净值</th>
                 <th>场内价格</th>
@@ -1512,7 +1671,19 @@ function FundHistoryDialog({
                   </td>
                   <td>
                     {item.purchase_status || "—"}
-                    <small>{formatDailyLimit(item)}</small>
+                    <small>{formatSnapshotDailyLimit(item)}</small>
+                  </td>
+                  <td>
+                    <div className="table-source-cell">
+                      <span>{formatFundScale(item.fund_scale)}</span>
+                      <SourceLink href={item.fund_scale_source_url} />
+                    </div>
+                  </td>
+                  <td>
+                    <div className="table-source-cell">
+                      <span>{formatQdiiQuota(item.manager_qdii_quota_usd)}</span>
+                      <SourceLink href={item.qdii_quota_source_url} />
+                    </div>
                   </td>
                   <td>{formatValue(item.estimate)}</td>
                   <td>{formatValue(item.nav)}</td>
@@ -1556,6 +1727,16 @@ function FundHistoryDialog({
                 values.daily_limit === null
                   ? undefined
                   : Number(values.daily_limit),
+              fund_scale:
+                values.fund_scale === null
+                  ? undefined
+                  : Number(values.fund_scale),
+              manager_qdii_quota_usd:
+                values.manager_qdii_quota_usd === null
+                  ? undefined
+                  : Number(values.manager_qdii_quota_usd),
+              fund_manager: values.fund_manager,
+              qdii_quota_date: values.qdii_quota_date,
               purchase_status: values.purchase_status,
               correction_note: note,
             });
@@ -1576,6 +1757,8 @@ function FundHistoryDialog({
                 ["nav", "净值"],
                 ["market_price", "场内价格"],
                 ["daily_limit", "单日限额"],
+                ["fund_scale", "基金规模（人民币元）"],
+                ["manager_qdii_quota_usd", "管理人 QDII 额度（美元）"],
               ] as const
             ).map(([key, label]) => (
               <label key={key}>
@@ -1601,6 +1784,25 @@ function FundHistoryDialog({
                 value={values.purchase_status || ""}
                 onChange={(event) =>
                   setValues({ ...values, purchase_status: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              基金管理人
+              <input
+                value={values.fund_manager || ""}
+                onChange={(event) =>
+                  setValues({ ...values, fund_manager: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              QDII 额度日期
+              <input
+                type="date"
+                value={values.qdii_quota_date || ""}
+                onChange={(event) =>
+                  setValues({ ...values, qdii_quota_date: event.target.value })
                 }
               />
             </label>

@@ -82,6 +82,12 @@ export interface FundSnapshot {
   tracking_error: number | null;
   purchase_status: string | null;
   daily_limit: number | null;
+  fund_scale: number | null;
+  fund_scale_source_url: string | null;
+  fund_manager: string | null;
+  manager_qdii_quota_usd: number | null;
+  qdii_quota_date: string | null;
+  qdii_quota_source_url: string | null;
   source_time: string;
   source: string;
   stale: boolean;
@@ -96,6 +102,10 @@ export interface FundWatch {
   exchange_code: string | null;
   category: string;
   benchmark: string | null;
+  channel_daily_limit: number | null;
+  limit_channel: string | null;
+  limit_source_url: string | null;
+  limit_effective_date: string | null;
   active: boolean;
   created_at: string;
   latest: FundSnapshot | null;

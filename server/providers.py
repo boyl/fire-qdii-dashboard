@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import math
 import re
+from html import unescape
+from io import BytesIO
 from datetime import date, datetime, timezone
 from typing import Any, Iterable
+from urllib.parse import urljoin
 
 import httpx
+from pypdf import PdfReader
 
 from .calculations import premium_rate, tracking_error
+
+
+SAFE_QDII_PAGE = "https://www.safe.gov.cn/safe/2018/0425/16849.html"
 
 
 def _clean(value: Any) -> Any:
@@ -36,6 +43,18 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _money_amount(value: Any) -> float | None:
+    text = _text(value)
+    if not text:
+        return None
+    match = re.search(r"([0-9][\d,.]*)\s*(万|亿)?", text)
+    if not match:
+        return None
+    number = float(match.group(1).replace(",", ""))
+    multiplier = {"万": 10_000, "亿": 100_000_000}.get(match.group(2), 1)
+    return number * multiplier
+
+
 def _text(value: Any) -> str | None:
     value = _clean(value)
     return None if value is None else str(value)
@@ -61,6 +80,75 @@ def _pick(row: dict[str, Any] | None, *names: str) -> Any:
         if any(name in str(key) for name in names) and _clean(value) is not None:
             return _clean(value)
     return None
+
+
+def _key_value_frame(frame: Any) -> dict[str, Any]:
+    if frame is None or getattr(frame, "empty", True):
+        return {}
+    columns = list(frame.columns)
+    if len(columns) < 2:
+        return {}
+    return {
+        str(row[columns[0]]).strip(): row[columns[1]]
+        for _, row in frame.iterrows()
+    }
+
+
+def _normalize_manager_name(value: Any) -> str:
+    return re.sub(r"[\s（）()]", "", str(value or ""))
+
+
+def _parse_qdii_quota_text(text: str) -> dict[str, float]:
+    quotas: dict[str, float] = {}
+    pattern = re.compile(
+        r"^\d+\s+(.+?)\s+\d{4}\.\d{2}\.\d{2}\s+([0-9]+(?:\.[0-9]+)?)\s*$"
+    )
+    for line in text.splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            quotas[_normalize_manager_name(match.group(1))] = (
+                float(match.group(2)) * 100_000_000
+            )
+    return quotas
+
+
+def _parse_eastmoney_basic_html(text: str) -> dict[str, str]:
+    scale_match = re.search(
+        r">规模</a>\s*[：:]\s*([0-9][\d,.]*)\s*亿元",
+        text,
+        flags=re.IGNORECASE,
+    )
+    manager_match = re.search(
+        r"管\s*理\s*人</span>\s*[：:]\s*<a[^>]*>([^<]+)</a>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    result: dict[str, str] = {}
+    if scale_match:
+        result["最新规模"] = f"{scale_match.group(1)}亿"
+    if manager_match:
+        result["基金公司"] = unescape(manager_match.group(1)).strip()
+    return result
+
+
+def _match_qdii_manager(
+    value: Any, quotas: dict[str, float]
+) -> tuple[str | None, float | None]:
+    manager = _text(value)
+    normalized = _normalize_manager_name(manager)
+    if not normalized:
+        return manager, None
+    if normalized in quotas:
+        return manager, quotas[normalized]
+    candidates = [
+        name
+        for name in quotas
+        if name.startswith(normalized) or normalized.startswith(name)
+    ]
+    if len(candidates) == 1:
+        matched = candidates[0]
+        return matched, quotas[matched]
+    return manager, None
 
 
 def _rows_by_code(frame: Any, candidates: Iterable[str]) -> dict[str, dict]:
@@ -196,6 +284,59 @@ class AKShareProvider:
                     }
         return None, None
 
+    @staticmethod
+    def _fetch_qdii_quotas() -> tuple[dict[str, float], str | None, dict]:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        with httpx.Client(
+            timeout=20,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            page = client.get(SAFE_QDII_PAGE)
+            page.raise_for_status()
+            pdf_match = re.search(
+                r'href=["\']([^"\']+\.pdf)["\']',
+                page.text,
+                flags=re.IGNORECASE,
+            )
+            if not pdf_match:
+                raise RuntimeError("外汇局页面未提供 QDII 额度表")
+            pdf_url = urljoin(str(page.url), pdf_match.group(1))
+            response = client.get(pdf_url)
+            response.raise_for_status()
+        text = "\n".join(
+            page.extract_text() or ""
+            for page in PdfReader(BytesIO(response.content)).pages
+        )
+        quotas = _parse_qdii_quota_text(text)
+        if not quotas:
+            raise RuntimeError("未能解析 QDII 额度表")
+        date_match = re.search(
+            r'<meta\s+name=["\']PubDate["\']\s+content=["\']([^"\']+)',
+            page.text,
+            flags=re.IGNORECASE,
+        )
+        quota_date = date_match.group(1)[:10] if date_match else None
+        return quotas, quota_date, {
+            "page": SAFE_QDII_PAGE,
+            "attachment": pdf_url,
+            "quota_date": quota_date,
+        }
+
+    @staticmethod
+    def _fetch_eastmoney_basic(code: str) -> dict[str, str]:
+        with httpx.Client(
+            timeout=12,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as client:
+            response = client.get(f"https://fund.eastmoney.com/{code}.html")
+            response.raise_for_status()
+        basic = _parse_eastmoney_basic_html(response.text)
+        if not basic:
+            raise RuntimeError("未能解析基金规模与管理人")
+        return basic
+
     def collect(self, watches: list[dict], mode: str = "full") -> dict[str, dict]:
         ak = self._ak()
         now = datetime.now(timezone.utc).isoformat()
@@ -203,6 +344,13 @@ class AKShareProvider:
         estimate_rows: dict[str, dict] = {}
         etf_rows: dict[str, dict] = {}
         lof_rows: dict[str, dict] = {}
+        basic_rows: dict[str, dict] = {}
+        basic_sources: dict[str, str] = {}
+        basic_source_urls: dict[str, str] = {}
+        basic_errors: dict[str, str] = {}
+        qdii_quotas: dict[str, float] = {}
+        qdii_quota_date: str | None = None
+        qdii_quota_raw: dict | None = None
         batch_errors: list[str] = []
 
         if mode in {"morning", "full"}:
@@ -227,6 +375,9 @@ class AKShareProvider:
             for watch in watches
             if watch.get("exchange_code")
         }
+        off_exchange_watches = [
+            watch for watch in watches if not watch.get("exchange_code")
+        ]
         if exchange_codes and mode in {"evening", "full"}:
             try:
                 etf_rows = _rows_by_code(ak.fund_etf_spot_em(), ("代码",))
@@ -236,6 +387,34 @@ class AKShareProvider:
                 lof_rows = _rows_by_code(ak.fund_lof_spot_em(), ("代码",))
             except Exception as exc:
                 batch_errors.append(f"LOF 行情：{exc}")
+        if off_exchange_watches and mode in {"evening", "full"}:
+            for watch in off_exchange_watches:
+                code = str(watch["fund_code"]).zfill(6)
+                try:
+                    basic_rows[code] = _key_value_frame(
+                        ak.fund_individual_basic_info_xq(symbol=code)
+                    )
+                    basic_sources[code] = "雪球基金"
+                    basic_source_urls[code] = (
+                        f"https://danjuanfunds.com/djapi/fund/{code}"
+                    )
+                except Exception as exc:
+                    try:
+                        basic_rows[code] = self._fetch_eastmoney_basic(code)
+                        basic_sources[code] = "天天基金"
+                        basic_source_urls[code] = (
+                            f"https://fund.eastmoney.com/{code}.html"
+                        )
+                    except Exception as fallback_exc:
+                        basic_errors[code] = f"{exc}; 天天基金回退：{fallback_exc}"
+            try:
+                (
+                    qdii_quotas,
+                    qdii_quota_date,
+                    qdii_quota_raw,
+                ) = self._fetch_qdii_quotas()
+            except Exception as exc:
+                batch_errors.append(f"QDII 外汇额度：{exc}")
 
         output: dict[str, dict] = {}
         for watch in watches:
@@ -253,6 +432,9 @@ class AKShareProvider:
                 or None
             )
             errors = list(batch_errors)
+            if code in basic_errors:
+                errors.append(f"基金规模：{basic_errors[code]}")
+            basic = basic_rows.get(code) or {}
             fund_values: dict[str, float] = {}
             benchmark_values: dict[str, float] = {}
             nav = _number(
@@ -302,6 +484,25 @@ class AKShareProvider:
             )
             market_price = _number(_pick(market, "最新价", "市价"))
             iopv = _number(_pick(market, "IOPV实时估值", "IOPV"))
+            fund_manager = _text(basic.get("基金公司"))
+            fund_scale = _money_amount(basic.get("最新规模"))
+            fund_scale_source_url = basic_source_urls.get(code)
+            if market:
+                latest_shares = _number(_pick(market, "最新份额"))
+                scale_value = nav or iopv or market_price
+                if latest_shares is not None and scale_value is not None:
+                    fund_scale = latest_shares * scale_value
+                    market_prefix = (
+                        "sh" if (exchange_code or "").startswith("5") else "sz"
+                    )
+                    fund_scale_source_url = (
+                        f"https://quote.eastmoney.com/"
+                        f"{market_prefix}{exchange_code}.html"
+                    )
+            fund_manager, manager_qdii_quota_usd = _match_qdii_manager(
+                fund_manager,
+                qdii_quotas,
+            )
             premium, premium_basis = premium_rate(market_price, iopv, nav)
             estimate_error = (
                 round((estimate - nav) / nav * 100, 4)
@@ -350,17 +551,52 @@ class AKShareProvider:
                 else None,
                 "purchase_status": purchase_status,
                 "daily_limit": daily_limit,
+                "fund_scale": fund_scale,
+                "fund_scale_source_url": (
+                    fund_scale_source_url if fund_scale is not None else None
+                ),
+                "fund_manager": fund_manager,
+                "manager_qdii_quota_usd": manager_qdii_quota_usd,
+                "qdii_quota_date": (
+                    qdii_quota_date if manager_qdii_quota_usd is not None else None
+                ),
+                "qdii_quota_source_url": (
+                    (qdii_quota_raw or {}).get("attachment")
+                    if manager_qdii_quota_usd is not None
+                    else None
+                ),
                 "source_time": now,
-                "source": (
-                    f"{self.name} + {self.notice_source}"
-                    if limit_notice and daily_limit
-                    else self.name
+                "source": " + ".join(
+                    [
+                        self.name,
+                        *([basic_sources[code]] if code in basic_sources else []),
+                        *(
+                            ["国家外汇管理局"]
+                            if manager_qdii_quota_usd is not None
+                            else []
+                        ),
+                        *(
+                            [self.notice_source]
+                            if limit_notice and daily_limit
+                            else []
+                        ),
+                    ]
                 ),
                 "errors": errors,
                 "raw": {
                     "purchase": purchase,
                     "estimate": estimate_row,
                     "market": market,
+                    "basic": basic,
+                    "qdii_quota": (
+                        {
+                            **(qdii_quota_raw or {}),
+                            "fund_manager": fund_manager,
+                            "quota_usd": manager_qdii_quota_usd,
+                        }
+                        if manager_qdii_quota_usd is not None
+                        else None
+                    ),
                     "limit_notice": limit_notice,
                 },
             }
